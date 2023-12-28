@@ -7,7 +7,6 @@
 #include "sunrise_i2c.h"
 #include <Wire.h>
 
-// #define CONFIGURE_SENSOR 1
 #define FORMAT_SPIFFS_IF_FAILED true
 
 // Adafruit E-Ink Friend pins
@@ -49,38 +48,6 @@ void setup() {
   pinMode(RDY, INPUT);           // Initialize pin to check if measurement is ready (nRDY-pin)
 
   pinMode(CO_EN, OUTPUT);        // Initialize pin for enabling sensor
-
-#ifdef CONFIGURE_SENSOR
-  Serial.print("Configuring sensor");
-  digitalWrite(CO_EN, HIGH);     
-  delay(STABILIZATION_MS);
-  sunrise.initSunrise();
-
-  Serial.print("Error status: ");
-  Serial.println(sunrise.readErrorStatus(), BIN);
-  delay(50);
-
-  Serial.print("Set number of samples: ");
-  if (sunrise.setNbrSamples(8)) {
-    Serial.println("SUCCESS");
-  } else {
-    Serial.println("FAILED");
-  }
-
-  Serial.print("Set measurement mode: ");
-  if (sunrise.setMeasurementMode(SINGLE)) {
-    Serial.println("SUCCESS");
-  } else {
-    Serial.println("FAILED");
-  }
-
-  Serial.print("Reset sensor: ");
-  if (sunrise.resetSensor()) {
-    Serial.println("SUCCESS");
-  } else {
-    Serial.println("FAILED");
-  }
-#endif
 
   if (!SPIFFS.begin(FORMAT_SPIFFS_IF_FAILED)) {
     Serial.println("SPIFFS Mount Failed");
@@ -204,17 +171,90 @@ void updateDisplay(uint16_t co2, int batt) {
   display.display();
 }
 
+void showText(String text) {
+  display.begin();
+  Serial.println("Display ready");
+  display.setRotation(1);
+  display.clearBuffer();
+  display.fillScreen(EPD_WHITE);
+  display.setFont(&FreeSansBold12pt7b);
+  display.setCursor(0, 0);
+  display.setTextColor(EPD_BLACK);
+  display.setTextWrap(true);
+  display.print(text);
+}
+
+void calibrate() {
+    Serial.print("Configuring sensor");
+    digitalWrite(CO_EN, HIGH);     
+    delay(STABILIZATION_MS);
+    sunrise.initSunrise();
+
+    // Serial.print("Error status: ");
+    // Serial.println(sunrise.readErrorStatus(), BIN);
+    // delay(1000);
+
+    // Serial.print("Set number of samples: ");
+    // Serial.println(sunrise.setNbrSamples(8) ? "OK" : "FAILED");
+
+    // Serial.print("Set measurement mode: ");
+    // Serial.println(sunrise.setMeasurementMode(SINGLE) ? "OK" : "FAILED");
+
+    // Serial.print("Disable ABC: ");
+    // Serial.println(sunrise.setABCPeriod(0) ? "OK" : "FAILED");
+
+    // Serial.print("Disable ABC: ");
+    // Serial.println(sunrise.setABCPeriod(0) ? "OK" : "FAILED");
+
+    // Serial.print("Reset sensor: ");
+    // Serial.println(sunrise.resetSensor() ? "OK" : "FAILED");
+
+    Serial.print("Error status: ");
+    Serial.println(sunrise.readErrorStatus(), BIN);
+    delay(1000);
+
+    Serial.print("Clear calibration status: ");
+    Serial.println(sunrise.clearCalibrationStatus() ? "OK" : "FAILED");
+
+    Serial.print("Write calibration target (420ppm): ");
+    Serial.println(sunrise.writeCalibrationTarget(420) ? "OK" : "FAILED");
+
+    Serial.print("Perform calibration: ");
+    Serial.println(sunrise.setCalibrationCommand(TARGET_CALIBRATION) ? "OK" : "FAILED");
+
+    Serial.print("Calibration status: ");
+    Serial.println(sunrise.readCalibrationStatus());
+
+    String buffer = "";
+    for (int i=0; i < 5; i++) {
+      uint16_t co2 = measure();
+      Serial.printf("CO2 : %dppm\n", co2);
+      buffer += co2;
+      buffer += "\n";
+      delay(100);
+    }
+
+    showText(buffer);
+    display.display();
+    delay(EPD_SETTLE_MS);
+}
+
 void loop() {
   Serial.println("************************* WAKING UP ******************************");
   digitalWrite(DONE, LOW);     
   readSensorStateFromFlash();
 
+  int batt = analogRead(BATT_LEVEL);
+  if (batt > 4000) {
+    calibrate();    
+    writeSensorStateToFlash();
+    digitalWrite(DONE, HIGH);
+    while(1) { delay(1000); }
+  }
+
+
   size_t numStoredMeasurements = getStoredMeasurementCount();
   Serial.printf("Have %d stored measurements\n", numStoredMeasurements);
-  // With 5 minute wakeups, every 12th measurement marks one hour
-  if (numStoredMeasurements % 12 == 0) {
-    sunrise.incrementABCTime();
-  }
 
   uint16_t co2 = measure();
   writeMeasurementToFlash(co2);
@@ -229,7 +269,6 @@ void loop() {
   Serial.println("");
   writeSensorStateToFlash();
 
-  int batt = analogRead(BATT_LEVEL);
   Serial.printf("Batt : %d\n", batt);
   updateDisplay(co2, batt);
   delay(EPD_SETTLE_MS);
