@@ -3,7 +3,7 @@
 #include "FS.h"
 #include "SPIFFS.h"
 #include "Lato.h"
-#include "FreeSansBold12pt7b.h"
+#include "pf.h"
 #include "sunrise_i2c.h"
 #include <Wire.h>
 
@@ -16,7 +16,16 @@
 #define RST 20             // can set to -1 and share with microcontroller Reset!
 #define EPD_BUSY -1        // can set to -1 to not use a pin (will wait a fixed delay)
 #define EPD_SPI &SPI       // primary SPI
-#define EPD_SETTLE_MS 1500 // Additional time to wait for the display uptate to complete
+// #define EPD_SETTLE_MS 1500 // Additional time to wait for the display uptate to complete
+#define EPD_SETTLE_MS 1000 // Additional time to wait for the display uptate to complete
+#define WIDTH 400
+#define HEIGHT 300
+#define M 5                // Margin
+#define LEGEND_WIDTH 35
+#define VGRIDLINE_STEP 36  // gridline every 36 pixels (=5*36 minutes or 3 hours)
+#define BATTERY_WIDTH 20
+#define BATTERY_HEIGHT 10
+
 
 // Senseair Sunrise pins
 #define CO_EN 2      // GPIO for EN-pin
@@ -32,7 +41,7 @@
 extern uint8_t powerDownData[];
 
 // Display
-Adafruit_SSD1608 display(200, 200, DC, RST, ECS, SRCS, EPD_BUSY, EPD_SPI);
+Adafruit_SSD1681 display(HEIGHT, WIDTH, DC, RST, ECS, SRCS, EPD_BUSY, EPD_SPI);
 
 // Sensor
 sunrise sunrise;
@@ -124,60 +133,97 @@ uint16_t measure() {
   return co2;
 }
 
+uint16_t ppm2y(uint16_t ppm) {
+  return HEIGHT + 40 - (ppm >> 3);
+}
+
 void updateDisplay(uint16_t co2, int batt) {
   char buffer[4];
 
+  display.begin();
+  // For some reason the display does not work after the initialization,
+  // but does after the second initialization.
   display.begin();
   Serial.println("Display ready");
   display.setRotation(1);
 
   // Initialize buffer
   display.clearBuffer();
-  display.fillScreen(EPD_WHITE);
   display.setTextWrap(false);
   display.setTextColor(EPD_BLACK);
 
-  // Draw battery level
-  itoa(batt, buffer, 10);  
-  display.setFont(&FreeSansBold12pt7b);
-  display.setCursor(0, 20);  
-  display.print(buffer);  
+  // Draw battery indicator:
+  display.drawRect(M, M, BATTERY_WIDTH, BATTERY_HEIGHT, EPD_BLACK);
+  // display.drawRect(M + 1, M + 1, BATTERY_WIDTH - 2, BATTERY_HEIGHT - 2, EPD_BLACK);
+  display.drawRect(M + BATTERY_WIDTH, M + 3, 2, BATTERY_HEIGHT - 6, EPD_BLACK);
+  int16_t batt_pixels = (batt - 900) / 20; // should be in 0-17 range
+  if (batt_pixels > BATTERY_WIDTH - 4) {
+    batt_pixels = BATTERY_WIDTH - 4;
+  }
+  display.fillRect(M + 2, M + 2, batt_pixels, BATTERY_HEIGHT - 4, EPD_BLACK);
 
   // Draw current measurement
   itoa(co2, buffer, 10);
-  display.setFont(&Lato_Black40pt7b);
-  int16_t x1, y1;
+  display.setFont(&Lato_Black50pt7b);
+  int16_t x, y;
   uint16_t w, h;
-  display.getTextBounds(buffer, 0, 0, &x1, &y1, &w, &h);
-  display.setCursor(100 - w / 2 - 5, 100 + h / 2);
+  display.getTextBounds(buffer, 0, 0, &x, &y, &w, &h);
+  display.setCursor(WIDTH - M - w, M + h);
   display.print(buffer);
-  
-  // // Draw historic graph  
-  // File file = SPIFFS.open("/values.bin");
-  // if (!file) {
-  //   Serial.println("- failed to open /values.bin for appending");
-  //   return;
-  // }
 
-  // uint32_t pos = file.size() - 200;
-  // file.seek(pos > 0 ? pos : 0);
-  // x1 = 0;
-  // while (file.available()) {
-  //   y1 = 200 - file.read() / 2;
-  //   // FIXME draw dot on x1, y1
-  // }
-  // file.close();
+  // Draw historic graph  
+  File file = SPIFFS.open("/values.bin");
+  if (!file) {
+    Serial.println("- failed to open /values.bin for reading");
+    return;
+  }
 
-  display.display();
+  // Read last [up to] 360 measurements from file and draw them
+  int16_t ppm;
+  uint32_t pos = file.size() - (WIDTH - LEGEND_WIDTH - M);
+  file.seek(pos > 0 ? pos : 0);
+  x = LEGEND_WIDTH;
+  while (file.available()) {
+    ppm = file.read() << 3;
+    display.drawLine(x, ppm2y(ppm), x, HEIGHT, EPD_BLACK);
+    x++;
+  }
+  file.close();
+
+  // Draw vertical grid lines every 36 pixels (=3 hours)
+  x -= VGRIDLINE_STEP;
+  while (x > LEGEND_WIDTH) {
+    for (y = ppm2y(1900) + 1; y < HEIGHT; y += 2) {
+      display.drawPixel(x, y, EPD_BLACK);
+    }
+    x -= VGRIDLINE_STEP;
+  }
+
+  // Draw horizontal grid lines
+  display.setFont(&pf_tempesta_seven4pt7b);
+  for (ppm = 1800; ppm >= 400; ppm -= 200) {
+    y = ppm2y(ppm);
+    itoa(ppm, buffer, 10);
+    display.setCursor(M, y + 3);  
+    display.print(buffer);
+    for (x = LEGEND_WIDTH; x < WIDTH - M; x += 2) {
+      display.drawPixel(x, y, EPD_BLACK);
+    }
+  }
+
+  Serial.println("Displaying...");
+  display.display(true);
+  Serial.println("Displaying done.");
 }
 
 void showText(String text) {
   display.begin();
+  display.begin();
   Serial.println("Display ready");
   display.setRotation(1);
   display.clearBuffer();
-  display.fillScreen(EPD_WHITE);
-  display.setFont(&FreeSansBold12pt7b);
+  // FIXME this font can only display digits!
+  display.setFont(&pf_tempesta_seven4pt7b);
   display.setCursor(0, 0);
   display.setTextColor(EPD_BLACK);
   display.setTextWrap(true);
@@ -275,5 +321,5 @@ void loop() {
 
   Serial.println("************************* GOING TO SLEEP ******************************");
   digitalWrite(DONE, HIGH);
-  delay(10000);  // 10s
+  delay(20000);  // 20s
 }
