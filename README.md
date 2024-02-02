@@ -68,3 +68,19 @@ screen.
 
 * [Case model .f3d file](/docs/case/co2sensor_case.f3d)
 
+## Code
+
+The Arduino sketch:
+
+* reads sensor state from ESP32 flash
+* reads battery voltage from ADC GPIO pin
+* Measures CO2 level
+* Writes the measurement to an append-only file on flash filesystem
+* saves sensor state to flash
+* displays CO2 measurement, battery level and measurement history graph on the
+  eInk display
+* sends a signal to TPL5110 to cut power
+
+Here's how the UI currently looks:
+
+![UI](/docs/display.jpg?raw=true "UI")
