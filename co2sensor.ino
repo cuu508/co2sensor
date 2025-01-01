@@ -1,22 +1,24 @@
 #include "Adafruit_EPD.h"
 #include <Adafruit_GFX.h>  // Core graphics library
-#include "FS.h"
-#include "SPIFFS.h"
+#include <Adafruit_LittleFS.h>
+#include <InternalFileSystem.h>
 #include "Lato.h"
 #include "pf.h"
+#include "FreeSansBold12pt7b.h"
 #include "sunrise_i2c.h"
-#include <Wire.h>
+#include <Adafruit_TinyUSB.h> // for Serial
 
-#define FORMAT_SPIFFS_IF_FAILED true
+
+using namespace Adafruit_LittleFS_Namespace;
 
 // Adafruit E-Ink Friend pins
-#define DC 21
-#define ECS 3
-#define SRCS 7
-#define RST 20             // can set to -1 and share with microcontroller Reset!
+#define EPD_EN 2           // FIXME currently unused
+#define DC 0
+#define ECS -1
+#define SRCS -1
+#define RST 1              // can set to -1 and share with microcontroller Reset!
 #define EPD_BUSY -1        // can set to -1 to not use a pin (will wait a fixed delay)
 #define EPD_SPI &SPI       // primary SPI
-// #define EPD_SETTLE_MS 1500 // Additional time to wait for the display uptate to complete
 #define EPD_SETTLE_MS 1000 // Additional time to wait for the display uptate to complete
 #define WIDTH 400
 #define HEIGHT 300
@@ -26,17 +28,10 @@
 #define BATTERY_WIDTH 20
 #define BATTERY_HEIGHT 10
 
-
 // Senseair Sunrise pins
-#define CO_EN 2      // GPIO for EN-pin
-#define RDY 10        // GPIO for nRDY-pin
+#define CO_EN 3       // GPIO for EN-pin
+#define RDY 9         // GPIO for nRDY-pin
 #define STABILIZATION_MS 35
-
-// TPL5110
-#define DONE 1
-
-// Battery
-#define BATT_LEVEL 0
 
 extern uint8_t powerDownData[];
 
@@ -47,30 +42,36 @@ Adafruit_SSD1681 display(HEIGHT, WIDTH, DC, RST, ECS, SRCS, EPD_BUSY, EPD_SPI);
 sunrise sunrise;
 
 void setup() {
-  pinMode(DONE, OUTPUT);        // Initialize pin for turning off power
-  digitalWrite(DONE, LOW);     
+  pinMode(LED_RED, OUTPUT);
+  digitalWrite(LED_RED, LOW);
 
   Serial.begin(115200);
+  while ( !Serial ) delay(10);   // for nrf52840 with native usb
   Serial.println("Booting!");
 
-  pinMode(BATT_LEVEL, INPUT);   // Initialize pin for reading battery level
   pinMode(RDY, INPUT);           // Initialize pin to check if measurement is ready (nRDY-pin)
-
   pinMode(CO_EN, OUTPUT);        // Initialize pin for enabling sensor
+  pinMode(EPD_EN, OUTPUT);       // Initialize pin for enabling display
+  pinMode(LED_GREEN, OUTPUT);
+  pinMode(LED_BLUE, OUTPUT);
 
-  if (!SPIFFS.begin(FORMAT_SPIFFS_IF_FAILED)) {
-    Serial.println("SPIFFS Mount Failed");
-    while (1) { delay(1000); };
+
+  InternalFS.begin();
+
+  // Calibrare?
+  if (0) {
+    delay(10000);
+    calibrate();    
+    writeSensorStateToFlash();
+    Serial.print("Calibration complete.");
+    while(1) { delay(1000); }
   }
-
-  Serial.printf("Total bytes on flash: %d\n", SPIFFS.totalBytes());
-  Serial.printf("Used bytes on flash: %d\n", SPIFFS.usedBytes()); 
 }
 
 void readSensorStateFromFlash() {
   Serial.print("Reading sensor state from flash... ");
 
-  File file = SPIFFS.open("/sensor.bin");
+  File file = InternalFS.open("/sensor.bin");
   if (!file) {
     Serial.println("- failed to open /sensor.bin for reading");
     return;
@@ -84,7 +85,7 @@ void readSensorStateFromFlash() {
 void writeSensorStateToFlash() {
   Serial.print("Writing sensor state to flash... ");
 
-  File file = SPIFFS.open("/sensor.bin", FILE_WRITE);
+  File file = InternalFS.open("/sensor.bin", FILE_O_WRITE);
   if (!file) {
     Serial.println("- failed to open /sensor.bin for writing");
     return;
@@ -101,18 +102,21 @@ void writeMeasurementToFlash(uint16_t data) {
   // divide by 8
   uint8_t chopped = data >= 2048 ? 255 : data >> 3; 
 
-  File file = SPIFFS.open("/values.bin", FILE_APPEND);
+  File file = InternalFS.open("/values.bin", FILE_O_WRITE);
   if (!file) {
     Serial.println("- failed to open /values.bin for appending");
     return;
   }
+
+  // Seek to the end of the file (for a poor man's append)
+  file.seek(file.size());
   
   file.write(chopped);
   file.close();
 }
 
 size_t getStoredMeasurementCount() {
-  File file = SPIFFS.open("/values.bin");
+  File file = InternalFS.open("/values.bin");
   if (!file) {
     return 0;
   }
@@ -141,9 +145,6 @@ void updateDisplay(uint16_t co2, int batt) {
   char buffer[4];
 
   display.begin();
-  // For some reason the display does not work after the initialization,
-  // but does after the second initialization.
-  display.begin();
   Serial.println("Display ready");
   display.setRotation(1);
 
@@ -156,7 +157,7 @@ void updateDisplay(uint16_t co2, int batt) {
   display.drawRect(M, M, BATTERY_WIDTH, BATTERY_HEIGHT, EPD_BLACK);
   // display.drawRect(M + 1, M + 1, BATTERY_WIDTH - 2, BATTERY_HEIGHT - 2, EPD_BLACK);
   display.drawRect(M + BATTERY_WIDTH, M + 3, 2, BATTERY_HEIGHT - 6, EPD_BLACK);
-  int16_t batt_pixels = (batt - 900) / 20; // should be in 0-17 range
+  int16_t batt_pixels = (batt - 300) / 20; // should be in 0-17 range
   if (batt_pixels > BATTERY_WIDTH - 4) {
     batt_pixels = BATTERY_WIDTH - 4;
   }
@@ -172,7 +173,7 @@ void updateDisplay(uint16_t co2, int batt) {
   display.print(buffer);
 
   // Draw historic graph  
-  File file = SPIFFS.open("/values.bin");
+  File file = InternalFS.open("/values.bin");
   if (!file) {
     Serial.println("- failed to open /values.bin for reading");
     return;
@@ -180,7 +181,7 @@ void updateDisplay(uint16_t co2, int batt) {
 
   // Read last [up to] 360 measurements from file and draw them
   int16_t ppm;
-  uint32_t pos = file.size() - (WIDTH - LEGEND_WIDTH - M);
+  int32_t pos = file.size() - (WIDTH - LEGEND_WIDTH - M);
   file.seek(pos > 0 ? pos : 0);
   x = LEGEND_WIDTH;
   while (file.available()) {
@@ -217,17 +218,18 @@ void updateDisplay(uint16_t co2, int batt) {
 }
 
 void showText(String text) {
-  display.begin();
+  digitalWrite(EPD_EN, HIGH);     
   display.begin();
   Serial.println("Display ready");
   display.setRotation(1);
   display.clearBuffer();
-  // FIXME this font can only display digits!
-  display.setFont(&pf_tempesta_seven4pt7b);
+  display.setFont(&FreeSansBold12pt7b);
   display.setCursor(0, 0);
   display.setTextColor(EPD_BLACK);
   display.setTextWrap(true);
   display.print(text);
+  display.display(true);
+  digitalWrite(EPD_EN, LOW);     
 }
 
 void calibrate() {
@@ -236,75 +238,68 @@ void calibrate() {
     delay(STABILIZATION_MS);
     sunrise.initSunrise();
 
-    // Serial.print("Error status: ");
-    // Serial.println(sunrise.readErrorStatus(), BIN);
-    // delay(1000);
+    Serial.print("Error status: ");
+    Serial.println(sunrise.readErrorStatus(), BIN);
+    delay(1000);
 
-    // Serial.print("Set number of samples: ");
-    // Serial.println(sunrise.setNbrSamples(8) ? "OK" : "FAILED");
+    Serial.print("Set number of samples: ");
+    Serial.println(sunrise.setNbrSamples(8) ? "OK" : "FAILED");
 
-    // Serial.print("Set measurement mode: ");
-    // Serial.println(sunrise.setMeasurementMode(SINGLE) ? "OK" : "FAILED");
+    Serial.print("Set measurement mode: ");
+    Serial.println(sunrise.setMeasurementMode(SINGLE) ? "OK" : "FAILED");
 
-    // Serial.print("Disable ABC: ");
-    // Serial.println(sunrise.setABCPeriod(0) ? "OK" : "FAILED");
+    Serial.print("Disable ABC: ");
+    Serial.println(sunrise.setABCPeriod(0) ? "OK" : "FAILED");
 
-    // Serial.print("Disable ABC: ");
-    // Serial.println(sunrise.setABCPeriod(0) ? "OK" : "FAILED");
+    Serial.print("Disable ABC: ");
+    Serial.println(sunrise.setABCPeriod(0) ? "OK" : "FAILED");
 
-    // Serial.print("Reset sensor: ");
-    // Serial.println(sunrise.resetSensor() ? "OK" : "FAILED");
+    Serial.print("Reset sensor: ");
+    Serial.println(sunrise.resetSensor() ? "OK" : "FAILED");
 
     Serial.print("Error status: ");
     Serial.println(sunrise.readErrorStatus(), BIN);
     delay(1000);
 
-    Serial.print("Clear calibration status: ");
-    Serial.println(sunrise.clearCalibrationStatus() ? "OK" : "FAILED");
+    // Serial.print("Clear calibration status: ");
+    // Serial.println(sunrise.clearCalibrationStatus() ? "OK" : "FAILED");
 
-    Serial.print("Write calibration target (420ppm): ");
-    Serial.println(sunrise.writeCalibrationTarget(420) ? "OK" : "FAILED");
+    // Serial.print("Write calibration target (420ppm): ");
+    // Serial.println(sunrise.writeCalibrationTarget(420) ? "OK" : "FAILED");
 
-    Serial.print("Perform calibration: ");
-    Serial.println(sunrise.setCalibrationCommand(TARGET_CALIBRATION) ? "OK" : "FAILED");
+    // Serial.print("Perform calibration: ");
+    // Serial.println(sunrise.setCalibrationCommand(TARGET_CALIBRATION) ? "OK" : "FAILED");
 
-    Serial.print("Calibration status: ");
-    Serial.println(sunrise.readCalibrationStatus());
+    // Serial.print("Calibration status: ");
+    // Serial.println(sunrise.readCalibrationStatus());
 
-    String buffer = "";
-    for (int i=0; i < 5; i++) {
-      uint16_t co2 = measure();
-      Serial.printf("CO2 : %dppm\n", co2);
-      buffer += co2;
-      buffer += "\n";
-      delay(100);
-    }
+    // String buffer = "";
+    // for (int i=0; i < 5; i++) {
+    //   uint16_t co2 = measure();
+    //   Serial.printf("CO2 : %dppm\n", co2);
+    //   buffer += co2;
+    //   buffer += "\n";
+    //   delay(100);
+    // }
 
-    showText(buffer);
-    display.display();
-    delay(EPD_SETTLE_MS);
+    // showText(buffer);
+    // display.display();
+    // delay(EPD_SETTLE_MS);
 }
 
 void loop() {
   Serial.println("************************* WAKING UP ******************************");
-  digitalWrite(DONE, LOW);     
+  digitalWrite(LED_GREEN, LOW);
   readSensorStateFromFlash();
-
-  int batt = analogRead(BATT_LEVEL);
-  if (batt > 4000) {
-    calibrate();    
-    writeSensorStateToFlash();
-    digitalWrite(DONE, HIGH);
-    while(1) { delay(1000); }
-  }
-
 
   size_t numStoredMeasurements = getStoredMeasurementCount();
   Serial.printf("Have %d stored measurements\n", numStoredMeasurements);
 
+  digitalWrite(LED_BLUE, LOW);
   uint16_t co2 = measure();
-  writeMeasurementToFlash(co2);
+  digitalWrite(LED_BLUE, HIGH);
   Serial.printf("CO2 : %dppm\n", co2);
+  writeMeasurementToFlash(co2);
 
   Serial.print("Sensor state: ");
   uint8_t count = 0;
@@ -315,11 +310,12 @@ void loop() {
   Serial.println("");
   writeSensorStateToFlash();
 
-  Serial.printf("Batt : %d\n", batt);
-  updateDisplay(co2, batt);
+  digitalWrite(EPD_EN, HIGH);     
+  updateDisplay(co2, 0);
   delay(EPD_SETTLE_MS);
+  digitalWrite(EPD_EN, LOW);     
 
+  digitalWrite(LED_GREEN, HIGH);
   Serial.println("************************* GOING TO SLEEP ******************************");
-  digitalWrite(DONE, HIGH);
   delay(20000);  // 20s
 }
